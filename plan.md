@@ -13,14 +13,15 @@ An MVP is complete when all of the following are true:
 - Clicking the action requires no copy/paste, folder setup, extra Send click, or cloud environment.
 - Weaver detects an unavailable app-server and presents a useful recovery message.
 - A successful click creates a unique child directory beneath Weaver's project root.
-- The child directory is a Git repository on `main`.
+- The child directory is created without inspecting, initializing, or modifying source control.
 - Weaver creates one persistent Codex thread whose exact `cwd` is the child directory.
 - Weaver submits the normalized post context in one initial turn.
 - Weaver records a readable thread name and thread ID.
 - The result can be opened with `codex://threads/<thread-id>` in Codex Desktop.
 - Follow-up work occurs in Codex Desktop, not the extension.
 - The generated project cannot write into sibling Weaver projects under the configured sandbox policy.
-- The popup matches the approved Paper design closely enough for implementation review.
+- Every mounted tweet receives the same permanent `Weave` action, regardless of persisted build state.
+- The setup/recovery surface matches the approved Paper design closely enough for implementation review.
 
 ## 3. Product constraints
 
@@ -32,7 +33,7 @@ An MVP is complete when all of the following are true:
 - No Weaver-specific authentication layer.
 - One project per initial X post submission.
 - Deep-link handoff to the generated Codex thread.
-- Minimal popup; no conversation UI.
+- Minimal setup/recovery surface; no build dashboard or conversation UI.
 
 ### Explicitly out of scope
 
@@ -43,6 +44,7 @@ An MVP is complete when all of the following are true:
 - Follow-up chat or turn management.
 - Deployment of generated apps.
 - GitHub publication of generated apps.
+- Git or other source-control initialization and management.
 - Multi-agent orchestration inside Weaver.
 - X posting, liking, reposting, or automated replies.
 
@@ -54,26 +56,22 @@ An MVP is complete when all of the following are true:
 - It injects a yellow woven-loop icon and `Weave` label immediately before the share action.
 - The action uses native row height, spacing, and focus behavior.
 
-### Click states
+### Single action behavior
 
-1. **Idle:** `Weave`
-2. **Connecting:** connection spinner, disabled interaction
-3. **Submitted:** initial Codex thread and turn accepted
-4. **Building:** subtle progress treatment while the initial turn runs
-5. **Ready:** clicking opens the Codex thread
-6. **Error:** short inline error with retry and popup details
+- The action always uses the woven-loop icon and `Weave` label.
+- It is never replaced by connecting, building, ready, open, or retry indicators.
+- Operational progress remains background metadata rather than tweet UI.
+- Repeated clicks reconcile or open the existing Codex task instead of creating duplicate projects.
 
-The click handler must be idempotent. Repeated clicks for the same post should open or focus the existing handoff rather than create accidental duplicate projects, unless the user explicitly chooses a future `Weave another version` action.
+### Setup and recovery
 
-### Popup
+The extension action opens setup only when the user needs configuration or recovery:
 
-The popup is informational and operational, not conversational:
-
-- Weaver identity and tagline.
-- Codex connection state (`Ready to weave`, endpoint).
-- Recent submissions with `Building`, `Ready`, or `Open` state.
-- Settings entry for endpoint and project-root preferences.
-- Clicking a ready recent item opens its `codex://threads/<thread-id>` link.
+- Weaver identity and `Nothing to manage. Just weave.` positioning.
+- Project-root preference.
+- Codex connection state and advanced endpoint preference.
+- Exact copyable app-server recovery command.
+- No recent-build list and no per-tweet status dashboard.
 
 ## 5. Chrome extension architecture
 
@@ -112,7 +110,7 @@ Start with the minimum viable set:
 
 - Host permission for `https://x.com/*`.
 - Host permission for the chosen loopback WebSocket endpoint.
-- `storage` for settings and recent handoffs.
+- `storage` for settings and per-tweet operational state.
 - `notifications` only if completion notifications are included in MVP.
 
 Avoid broad host permissions and avoid exposing privileged extension functions through `externally_connectable`.
@@ -123,7 +121,7 @@ Avoid broad host permissions and avoid exposing privileged extension functions t
 - Locate stable post containers and action rows.
 - Extract the canonical status ID and URL.
 - Add a data marker so injection is idempotent.
-- Render only local visual state.
+- Extract the latest post context when the permanent action is clicked.
 - Send a typed `WEAVE_POST` message to the service worker.
 - Never construct app-server RPC methods or commands.
 
@@ -134,8 +132,8 @@ Avoid broad host permissions and avoid exposing privileged extension functions t
 - Perform the app-server initialize handshake.
 - Resolve and create the project path through fixed platform-specific operations.
 - Create the Codex thread and initial turn.
-- Track recent handoffs in `chrome.storage.local`.
-- Return concise state updates to the originating tab.
+- Store each tweet independently in `chrome.storage.local` so concurrent updates cannot overwrite one another.
+- Reconcile persisted submitted/building turns after service-worker restart.
 - Open the Codex deep link at the handoff boundary.
 
 Chrome 116 or newer should be the initial target so a WebSocket can keep a Manifest V3 service worker active when messages are exchanged within the activity window.
@@ -166,7 +164,7 @@ Extraction rules:
 
 - Prefer semantic attributes and canonical status links over positional selectors.
 - Do not depend on visible engagement counts.
-- Expand `t.co` links only when the destination is already present in the DOM; do not add an X API dependency for MVP.
+- Expand `t.co` links only when the destination is already present in the DOM; otherwise preserve the validated HTTPS short URL. Do not add an X API dependency for MVP.
 - Preserve line breaks in post text.
 - Treat media and external links as references, not trusted instructions.
 - Include quoted-post context but avoid recursively traversing arbitrary thread depth.
@@ -196,6 +194,11 @@ On a new WebSocket connection:
       "name": "weaver_chrome_extension",
       "title": "Weaver",
       "version": "0.1.0"
+    },
+    "capabilities": {
+      "experimentalApi": true,
+      "requestAttestation": false,
+      "optOutNotificationMethods": ["item/agentMessage/delta"]
     }
   }
 }
@@ -213,8 +216,8 @@ Implement request IDs, response correlation, timeouts, reconnect behavior, notif
 
 If the endpoint cannot be reached:
 
-- Return the button to an actionable error state.
-- Show `Codex app-server is offline` in the popup.
+- Keep the button visually unchanged and show an actionable recovery message.
+- Show `Codex app-server is offline` in the setup/recovery surface.
 - Display the exact startup command.
 - Do not silently fall back to a cloud service or deep-link-only flow.
 
@@ -250,14 +253,11 @@ Rules:
 
 ### Filesystem operation
 
-The extension cannot directly create arbitrary host directories. Use a fixed app-server `command/exec` operation with a validated, non-interpolated path strategy appropriate to the reported platform.
+The extension cannot directly create arbitrary host directories. Use the app-server filesystem API with validated absolute paths. A fixed, non-interpolated `command/exec` operation may be used only to discover the platform home directory.
 
-After directory creation:
+After directory creation, confirm the path remains a direct child of the configured Weaver root. Never inspect, initialize, or modify a Git repository, and never accept a command string from the content script.
 
-- Initialize Git on `main`.
-- Confirm the exact repository root.
-- Refuse nested or redirected repositories.
-- Do not use a general-purpose shell string supplied by the content script.
+Write a `.weaver-project.json` ownership marker before creating the Codex thread. A retry may reuse a directory only when that marker matches the post, or when an uncertain create request left the directory completely empty and Weaver can safely claim it. Reject files, links, mismatched markers, and unmarked directories containing user data.
 
 The project-creation operation must return an explicit success object before thread creation begins.
 
@@ -301,7 +301,8 @@ Build: Issue token pledges
     "input": [
       {
         "type": "text",
-        "text": "<fixed Weaver instruction envelope plus normalized post>"
+        "text": "<fixed Weaver instruction envelope plus normalized post>",
+        "text_elements": []
       }
     ],
     "cwd": "<absolute-project-path>",
@@ -328,7 +329,7 @@ Prototype both handoff timings:
 1. Deep-link immediately after `turn/start` is accepted.
 2. Deep-link after `turn/completed`.
 
-Prefer completion-based handoff unless testing proves Codex Desktop can reliably attach to a turn actively running in the external app-server process. The extension may show `Building` and send a browser notification when the thread becomes ready.
+Prefer completion-based handoff unless testing proves Codex Desktop can reliably attach to a turn actively running in the external app-server process. Progress is not rendered on the tweet action.
 
 ## 10. Desktop handoff
 
@@ -345,7 +346,7 @@ Required spike assertions:
 - The deep link opens Codex Desktop.
 - The correct persisted thread appears.
 - The thread uses the generated project path as its workspace.
-- The generated files and Git state are visible.
+- The generated files are visible.
 - A follow-up prompt in Desktop continues the same thread and directory.
 - The behavior survives closing and reopening Desktop.
 
@@ -362,6 +363,7 @@ interface WeaverBuild {
   projectName: string;
   projectPath: string;
   threadId: string;
+  turnId?: string;
   status: "submitted" | "building" | "ready" | "failed";
   errorSummary?: string;
   createdAt: string;
@@ -369,9 +371,7 @@ interface WeaverBuild {
 }
 ```
 
-Use `chrome.storage.local`, not sync, because local absolute paths and thread identifiers should stay on the machine that owns them.
-
-Cap recent history to a small number such as 25 entries. The popup initially renders the newest three.
+Use `chrome.storage.local`, not sync, because local absolute paths and thread identifiers should stay on the machine that owns them. Store each build under a key derived from its numeric post ID; metadata remains operational state and is not rendered as history.
 
 ## 12. Prompt safety
 
@@ -423,15 +423,15 @@ Source of truth: [Weaver in Paper](https://app.paper.design/file/01KZ7HXJF5HPVBT
 - Straw-yellow foreground and low-opacity accent surface.
 - Native action-row height.
 - Insert immediately before X's share action.
-- Include keyboard focus, hover, disabled, building, ready, and error states.
+- Include keyboard focus and hover treatment while keeping one permanent visual state.
 
-### Popup
+### Setup and recovery
 
-- 360px-wide dark popup.
-- Weaver mark and `Posts into projects` tagline.
-- Connection status first.
-- Recent build rows with fixed icon and status lanes.
-- Settings entry without authentication controls.
+- 420px-wide black setup surface.
+- Weaver mark and `Nothing to manage. Just weave.` headline.
+- Project folder and local Codex connection settings only.
+- Copyable offline recovery command.
+- No recent-build or conversation UI.
 
 ## 15. Testing strategy
 
@@ -464,7 +464,7 @@ Assert one injected action per post and no layout regression.
 
 - Initialization handshake.
 - Offline and reconnect behavior.
-- Project creation and Git initialization.
+- Project directory creation and collision handling.
 - Thread creation with exact `cwd`.
 - Initial turn submission.
 - Turn completion and error notifications.
@@ -508,7 +508,7 @@ Do not invest in X DOM integration until these gates pass.
 ### Phase 2: local build pipeline
 
 - Implement validated project naming.
-- Create the extension-specific root and child repository.
+- Create the extension-specific root and child project directory.
 - Implement the fixed Weaver build prompt.
 - Submit through app-server.
 - Persist build metadata.
@@ -518,12 +518,12 @@ Do not invest in X DOM integration until these gates pass.
 - Name threads.
 - Add `codex://threads/<thread-id>` launching.
 - Decide accepted-versus-completed handoff timing based on the spike.
-- Add completion notification and recent-build opening.
+- Add completion tracking and Desktop deep-link handoff.
 
 ### Phase 4: production UI
 
 - Implement the approved Paper tweet action.
-- Implement popup connection and recent-build states.
+- Implement the setup/recovery surface and permanent per-tweet action.
 - Add accessibility, keyboard, reduced-motion, and contrast verification.
 - Add concise recovery guidance.
 
@@ -567,4 +567,3 @@ These are intentionally deferred:
 5. Create a scratch project, thread, and turn through app-server.
 6. Verify `codex://threads/<thread-id>` opens the same project in Desktop.
 7. Record the result before proceeding to X DOM work.
-

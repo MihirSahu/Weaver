@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Weaver setup</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="setup-shell">
+      <header class="setup-header">
+        <div class="eyebrow"><img src="../assets/weaver-mark.svg" width="34" height="34" alt=""><span>Weaver setup</span></div>
+        <h1>Nothing to manage.<br>Just weave.</h1>
+        <p>Weaver lives beneath posts on X. This page only appears when setup or recovery needs your attention.</p>
+      </header>
+
+      <section class="settings-card" aria-label="Essential settings">
+        <div class="setting-row">
+          <label for="project-input">Projects folder</label>
+          <div class="setting-value" id="project-display-row">
+            <span id="project-value">Discovered on first weave</span>
+            <button class="text-action" id="change-project" type="button">Change</button>
+          </div>
+          <input id="project-input" type="text" spellcheck="false" placeholder="C:\Projects\Weaver" hidden>
+        </div>
+        <div class="setting-row">
+          <label>Codex app server</label>
+          <div class="setting-value">
+            <button class="connection-status" id="refresh-connection" type="button" title="Check connection again">
+              <i class="status-dot" aria-hidden="true"></i>
+              <span id="connection-value">Checking locally...</span>
+            </button>
+            <button class="secondary-action" id="advanced-button" type="button" aria-expanded="false">Advanced</button>
+          </div>
+          <div class="advanced-panel" id="advanced-panel" hidden>
+            <label for="endpoint-input">Endpoint</label>
+            <input id="endpoint-input" type="url" spellcheck="false">
+            <label class="check-row"><input id="open-input" type="checkbox"><span>Open Codex Desktop when ready</span></label>
+          </div>
+        </div>
+      </section>
+
+      <p class="form-error" id="form-error" role="alert" hidden></p>
+
+      <section class="recovery-card" aria-labelledby="recovery-title">
+        <div class="recovery-heading"><i aria-hidden="true"></i><h2 id="recovery-title">If Codex is offline</h2></div>
+        <p>Start the local app server, then return to the post and choose Weave again.</p>
+        <div class="command-row">
+          <code id="start-command">codex app-server --listen ws://127.0.0.1:4500</code>
+          <button id="copy-command" type="button">Copy</button>
+        </div>
+      </section>
+
+      <footer>
+        <span id="save-status">Changes save automatically</span>
+        <button id="done-button" type="button">Done</button>
+      </footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Weaver",
+  "description": "Turn X posts into isolated local Codex projects.",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://x.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*"],
+      "js": ["content/inject-weave-action.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Weaver",
+    "default_popup": "popup/popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:* ws://localhost:*"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/weaver-mark.svg"],
+      "matches": ["https://x.com/*"]
+    }
+  ]
+}
