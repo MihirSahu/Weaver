@@ -39,7 +39,16 @@ function isBuild(value: unknown): value is WeaverBuild {
 
 async function readSettings(): Promise<WeaverSettings> {
   const stored = await chrome.storage.local.get(STORAGE_KEYS.settings);
-  return { ...DEFAULT_SETTINGS, ...(stored[STORAGE_KEYS.settings] as Partial<WeaverSettings> | undefined) };
+  const legacy = stored[STORAGE_KEYS.settings] as (Partial<WeaverSettings> & { openOnStart?: unknown }) | undefined;
+  return {
+    ...DEFAULT_SETTINGS,
+    ...legacy,
+    openOnCompletion: typeof legacy?.openOnCompletion === "boolean"
+      ? legacy.openOnCompletion
+      : typeof legacy?.openOnStart === "boolean"
+        ? legacy.openOnStart
+        : DEFAULT_SETTINGS.openOnCompletion,
+  };
 }
 
 export async function getSettings(): Promise<WeaverSettings> {

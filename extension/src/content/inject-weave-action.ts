@@ -9,11 +9,18 @@ function installStyles(): void {
   const style = document.createElement("style");
   style.id = STYLE_ID;
   style.textContent = `
-    .weaver-action-slot{display:flex;align-items:center;justify-content:center;flex-shrink:0}
-    .weaver-action{height:47px;display:flex;align-items:center;justify-content:center;gap:6px;padding:0 10px;border:0;border-radius:999px;background:#F4D35E24;color:#F4D35E;font:700 13px/16px Arial,system-ui,sans-serif;letter-spacing:-.01em;cursor:pointer;transition:background-color .16s ease,color .16s ease,opacity .16s ease}
-    .weaver-action:hover{background:#F4D35E36}.weaver-action:focus-visible{outline:2px solid #F4D35E;outline-offset:2px}
-    .weaver-action svg{width:18px;height:18px;flex-shrink:0;overflow:visible}
-    @media (prefers-reduced-motion:reduce){.weaver-action{transition:none}}
+    .weaver-action-slot{width:34px;height:34px;display:flex;align-items:center;justify-content:center;flex-shrink:0;position:relative}
+    .weaver-action{width:34px;height:34px;display:flex;align-items:center;justify-content:center;padding:0;border:0;border-radius:999px;background:transparent;color:#71767B;cursor:pointer;position:relative;transition:background-color .16s ease,color .16s ease}
+    .weaver-action:hover,.weaver-action:focus-visible{background:#F4D35E24;color:#F4D35E}
+    .weaver-action:focus-visible{outline:2px solid #F4D35E;outline-offset:2px}
+    .weaver-action svg{width:20px;height:20px;flex-shrink:0;overflow:visible}
+    .weaver-action::after{content:attr(data-tooltip);position:absolute;left:50%;bottom:calc(100% + 7px);z-index:2;transform:translateX(-50%) translateY(2px);padding:6px 8px;border-radius:4px;background:#536471;color:#fff;font:700 11px/14px Arial,system-ui,sans-serif;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease,transform .12s ease}
+    .weaver-action:hover::after,.weaver-action:focus-visible::after{opacity:1;transform:translateX(-50%) translateY(0)}
+    @media (hover:hover) and (pointer:fine){
+      .weaver-action-slot{opacity:0;pointer-events:none;transform:translateY(2px);transition:opacity .16s ease,transform .16s ease}
+      article[data-testid="tweet"]:hover .weaver-action-slot,article[data-testid="tweet"]:focus-within .weaver-action-slot{opacity:1;pointer-events:auto;transform:translateY(0)}
+    }
+    @media (prefers-reduced-motion:reduce){.weaver-action,.weaver-action-slot,.weaver-action::after{transition:none}}
   `;
   document.documentElement.append(style);
 }
@@ -45,11 +52,50 @@ function directChildContaining(parent: Element, child: Element): Element | null 
   return current?.parentElement === parent ? current : null;
 }
 
+function findActionRow(article: HTMLElement): Element | null {
+  const knownAction = article.querySelector<HTMLElement>(
+    '[data-testid="share"], [data-testid="reply"], [data-testid="retweet"], [data-testid="unretweet"], [data-testid="like"], [data-testid="unlike"]',
+  );
+  return knownAction?.closest('[role="group"]') ?? null;
+}
+
+function findShareSlot(actionRow: Element): Element | null {
+  const share = actionRow.querySelector<HTMLElement>(
+    '[data-testid="share"], [aria-label="Share post"]',
+  );
+  if (share) return directChildContaining(actionRow, share);
+
+  // X no longer consistently exposes data-testid="share". The share action is
+  // still the final direct slot in the post action group, after Bookmark.
+  return actionRow.lastElementChild;
+}
+
 function showWeaveError(error: unknown): void {
-  const detail = error instanceof Error ? error.message : String(error);
+  const rawDetail = error instanceof Error ? error.message : String(error);
+  const detail = /extension context invalidated/i.test(rawDetail)
+    ? "Weaver was reloaded after this X tab opened. Refresh this X tab and choose Weave again."
+    : rawDetail;
   window.alert(
     `Weaver couldn't start this build.\n\n${detail}\n\nOpen Weaver from the Chrome toolbar for setup and recovery.`,
   );
+}
+
+function requestWeave(post: RuntimeRequest & { type: "WEAVE_POST" }): void {
+  let response: Promise<RuntimeResponse>;
+  try {
+    // Chrome throws synchronously here when an unpacked extension was reloaded
+    // after this content script entered the page. A Promise catch alone cannot
+    // handle that invalidated-context failure.
+    response = chrome.runtime.sendMessage<RuntimeRequest, RuntimeResponse>(post);
+  } catch (error) {
+    showWeaveError(error);
+    return;
+  }
+  void response
+    .then((result) => {
+      if (!result.ok) showWeaveError(result.error);
+    })
+    .catch(showWeaveError);
 }
 
 export function injectWeaveAction(article: HTMLElement): HTMLButtonElement | null {
@@ -60,10 +106,9 @@ export function injectWeaveAction(article: HTMLElement): HTMLButtonElement | nul
   if (matching) return matching.querySelector("button");
   oldSlots.forEach((slot) => slot.remove());
 
-  const share = article.querySelector<HTMLElement>('[data-testid="share"]');
-  const actionRow = share?.closest('[role="group"]');
-  if (!share || !actionRow) return null;
-  const shareSlot = directChildContaining(actionRow, share);
+  const actionRow = findActionRow(article);
+  if (!actionRow) return null;
+  const shareSlot = findShareSlot(actionRow);
   if (!shareSlot) return null;
 
   const slot = document.createElement("div");
@@ -73,25 +118,16 @@ export function injectWeaveAction(article: HTMLElement): HTMLButtonElement | nul
   const button = document.createElement("button");
   button.type = "button";
   button.className = "weaver-action";
-  button.title = "Weave";
   button.setAttribute("aria-label", "Weave");
+  button.dataset.tooltip = "Weave";
   button.append(markSvg());
-  const label = document.createElement("span");
-  label.className = "weaver-action-label";
-  label.textContent = "Weave";
-  button.append(label);
   slot.append(button);
   actionRow.insertBefore(slot, shareSlot);
 
   button.addEventListener("click", () => {
     const currentPost = extractPost(article);
     if (!currentPost || currentPost.postId !== slot.dataset.postId) return;
-    void chrome.runtime
-      .sendMessage<RuntimeRequest, RuntimeResponse>({ type: "WEAVE_POST", post: currentPost })
-      .then((response) => {
-        if (!response.ok) showWeaveError(response.error);
-      })
-      .catch(showWeaveError);
+    requestWeave({ type: "WEAVE_POST", post: currentPost });
   });
   return button;
 }

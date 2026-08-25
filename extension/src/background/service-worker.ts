@@ -1,4 +1,4 @@
-import { appServerStartCommand, DEFAULT_ENDPOINT } from "../shared/constants";
+import { backendStartCommand, DEFAULT_ENDPOINT, DESKTOP_TURN_START_METHOD } from "../shared/constants";
 import type { RuntimeRequest, RuntimeResponse } from "../shared/messages";
 import type { PostContext, WeaverBuild } from "../shared/models";
 import { createBuildInput } from "../shared/prompt";
@@ -6,7 +6,7 @@ import { findBuild, findBuildByThread, getBuilds, getSettings, saveBuild, transi
 import { isPostContext, isTrustedXSender, requiresClientReconnect, validateSettings } from "../shared/validation";
 import { CodexClient, type InitializeResult, type RpcNotification } from "./codex-client";
 import { openThread } from "./handoff";
-import { createThreadTitle, createWorkspacePolicy, prepareProject } from "./project-manager";
+import { createThreadTitle, createWorkspacePolicy, prepareProject, recordProjectThread } from "./project-manager";
 import {
   decideBuildReconciliation,
   isStaleReconciliationSnapshot,
@@ -41,6 +41,14 @@ class ReconciliationUnavailableError extends Error {
   }
 }
 
+class DesktopHandoffError extends Error {
+  constructor(error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error);
+    super(`Codex Desktop handoff failed: ${detail}`);
+    this.name = "DesktopHandoffError";
+  }
+}
+
 function completionKey(threadId: string, turnId: string): string {
   return `${threadId}:${turnId}`;
 }
@@ -56,7 +64,9 @@ function rememberPendingCompletion(params: TurnCompletedParams): void {
 async function openThreadOnce(threadId: string): Promise<void> {
   const current = handoffsInFlight.get(threadId);
   if (current) return current;
-  const handoff = openThread(threadId).finally(() => {
+  const handoff = openThread(threadId).catch((error) => {
+    throw error instanceof DesktopHandoffError ? error : new DesktopHandoffError(error);
+  }).finally(() => {
     if (handoffsInFlight.get(threadId) === handoff) handoffsInFlight.delete(threadId);
   });
   handoffsInFlight.set(threadId, handoff);
@@ -71,8 +81,9 @@ async function automaticallyOpenThreadOnce(threadId: string): Promise<void> {
 
 function conciseError(error: unknown, endpoint = client?.endpoint ?? DEFAULT_ENDPOINT): string {
   const message = error instanceof Error ? error.message : String(error);
-  if (/app-server (?:is offline|connection is not open|disconnected)|timed out (?:connecting|waiting)|request timed out/i.test(message)) {
-    return `Codex app-server is offline. Start it with: ${appServerStartCommand(endpoint)}`;
+  if (error instanceof DesktopHandoffError) return message.slice(0, 300);
+  if (/Weaver backend (?:is offline|connection is not open|disconnected)|timed out (?:connecting|waiting)|request timed out/i.test(message)) {
+    return `Weaver backend is offline. Start it with: ${backendStartCommand(chrome.runtime.id, endpoint)}`;
   }
   return message.slice(0, 300);
 }
@@ -132,14 +143,11 @@ async function reconcileBuildOnce(build: WeaverBuild): Promise<ReconciliationRes
   }
   try {
     const codex = await getClient();
-    // `thread/read` only returns persisted state. Resuming is required to
-    // subscribe this replacement service-worker connection to turn events.
-    const result = await codex.request<ThreadResumeResult>("thread/resume", {
+    // Desktop owns active Weaver tasks. Reading persisted state lets recovery
+    // observe progress without stealing ownership from Desktop.
+    const result = await codex.request<ThreadResumeResult>("thread/read", {
       threadId: build.threadId,
-      cwd: build.projectPath,
-      runtimeWorkspaceRoots: [build.projectPath],
-      approvalPolicy: "never",
-      sandbox: "workspace-write",
+      includeTurns: true,
     });
     let transitionedToReady = false;
     const updated = await withBuildMutation(build.postId, async () => {
@@ -226,7 +234,9 @@ async function beginBuild(post: PostContext): Promise<WeaverBuild> {
       await openReconciledBuild(existing);
       return existing;
     }
-    if (existing.status !== "failed") return existing;
+    if (existing.status !== "failed") {
+      return existing;
+    }
   }
 
   const codex = await getClient();
@@ -252,7 +262,23 @@ async function beginBuild(post: PostContext): Promise<WeaverBuild> {
     await updateSettings((current) => current.projectRoot ? current : { ...current, projectRoot: project.projectRoot });
   }
 
-  let threadId = build.threadId;
+  let threadId = build.threadId || project.recoveredThreadId || "";
+  if (!build.threadId && project.recoveredThreadId) {
+    build = await withBuildMutation(post.postId, () => saveBuild(
+      transitionBuild(build!, "submitted", {
+        threadId: project.recoveredThreadId,
+        turnId: undefined,
+        errorSummary: undefined,
+      }),
+    ));
+    const recovered = (await reconcileBuild(build)).build;
+    if (recovered.status === "ready") {
+      await openReconciledBuild(recovered);
+      return recovered;
+    }
+    if (recovered.status === "building") return recovered;
+    build = recovered;
+  }
   if (!threadId && existing) {
     const listed = await codex.request<ThreadListResult>("thread/list", {
       cwd: project.projectPath,
@@ -261,8 +287,8 @@ async function beginBuild(post: PostContext): Promise<WeaverBuild> {
       sortDirection: "desc",
       sourceKinds: ["appServer"],
     });
-    // If thread/start succeeded but its response was lost, the recoverable
-    // thread has no user turn yet. Never adopt a populated task from this cwd.
+    // A persisted build with no thread ID means thread/start may have succeeded
+    // while its response was lost. Only an empty task is safe to adopt here.
     threadId = listed.data.find((candidate) => candidate.preview.trim() === "")?.id ?? "";
     if (threadId) {
       build = await withBuildMutation(post.postId, () => saveBuild(
@@ -273,13 +299,18 @@ async function beginBuild(post: PostContext): Promise<WeaverBuild> {
         await openReconciledBuild(recovered);
         return recovered;
       }
-      if (recovered.status === "building") return recovered;
+      if (recovered.status === "building") {
+        return recovered;
+      }
       build = recovered;
     }
   }
-  if (threadId) {
-    await codex.request("thread/resume", { threadId, cwd: project.projectPath, approvalPolicy: "never", sandbox: "workspace-write" });
-  } else {
+  if (!threadId && project.wasExisting && !existing) {
+    throw new Error(
+      `The Weaver project ${project.projectName} predates exact task recovery. Restore its Chrome storage record or choose a different project root.`,
+    );
+  }
+  if (!threadId) {
     const started = await codex.request<ThreadStartResult>("thread/start", {
       cwd: project.projectPath,
       runtimeWorkspaceRoots: [project.projectPath],
@@ -292,24 +323,29 @@ async function beginBuild(post: PostContext): Promise<WeaverBuild> {
   build = await withBuildMutation(post.postId, () => saveBuild(
     transitionBuild(build!, "submitted", { threadId, turnId: undefined, errorSummary: undefined }),
   ));
+  await recordProjectThread(codex, platform, project, post, threadId);
 
   await codex.request("thread/name/set", { threadId, name: createThreadTitle(post) });
-  const turn = await codex.request<TurnStartResult>("turn/start", {
-    threadId,
-    input: [createBuildInput(post)],
-    cwd: project.projectPath,
-    runtimeWorkspaceRoots: [project.projectPath],
-    approvalPolicy: "never",
-    sandboxPolicy: createWorkspacePolicy(project.projectPath),
-  });
-  let consumedCompletion = false;
+  await automaticallyOpenThreadOnce(threadId);
+  let turn: TurnStartResult;
+  try {
+    turn = await codex.request<TurnStartResult>(DESKTOP_TURN_START_METHOD, {
+      threadId,
+      input: [createBuildInput(post)],
+      cwd: project.projectPath,
+      runtimeWorkspaceRoots: [project.projectPath],
+      approvalPolicy: "never",
+      sandboxPolicy: createWorkspacePolicy(project.projectPath),
+    });
+  } catch (error) {
+    throw new DesktopHandoffError(error);
+  }
   build = await withBuildMutation(post.postId, async () => {
     const latest = await findBuild(post.postId);
     if (isTerminalBuildForTurn(latest, threadId, turn.turn.id)) return latest!;
     const completion = pendingTurnCompletions.get(completionKey(threadId, turn.turn.id));
     pendingTurnCompletions.delete(completionKey(threadId, turn.turn.id));
     if (completion) {
-      consumedCompletion = true;
       const succeeded = completion.turn.status === "completed";
       return saveBuild(transitionBuild(latest ?? build!, succeeded ? "ready" : "failed", {
         threadId,
@@ -321,9 +357,6 @@ async function beginBuild(post: PostContext): Promise<WeaverBuild> {
     }
     return saveBuild(transitionBuild(build!, "building", { turnId: turn.turn.id, errorSummary: undefined }));
   });
-  if (consumedCompletion && build.status === "ready" && (await getSettings()).openOnCompletion) {
-    await automaticallyOpenThreadOnce(build.threadId);
-  }
   return build;
 }
 
@@ -331,7 +364,7 @@ async function weave(post: PostContext): Promise<WeaverBuild> {
   const current = inFlight.get(post.postId);
   if (current) return current;
   const promise = beginBuild(post).catch(async (error) => {
-    if (error instanceof ReconciliationUnavailableError) throw error;
+    if (error instanceof ReconciliationUnavailableError || error instanceof DesktopHandoffError) throw error;
     const previous = await findBuild(post.postId);
     if (!previous) throw error;
     if (previous.status === "ready") throw error;

@@ -2,13 +2,18 @@
   "name": "weaver-chrome-extension",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@11.1.2",
   "type": "module",
   "scripts": {
+    "backend": "node backend/server.mjs",
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "tsc --noEmit && vitest run && node scripts/build.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.326",

@@ -80,3 +80,13 @@ it("serializes independent settings patches without losing either change", async
 
   expect(await getSettings()).toMatchObject({ projectRoot: "C:\\Weaver", openOnCompletion: false });
 });
+
+it("migrates the temporary start handoff preference back to completion", async () => {
+  records.set("weaverSettings", {
+    endpoint: "ws://127.0.0.1:4500",
+    projectRoot: null,
+    openOnStart: false,
+  });
+
+  expect(await getSettings()).toMatchObject({ openOnCompletion: false });
+});

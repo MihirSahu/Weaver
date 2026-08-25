@@ -7,53 +7,83 @@
     <link rel="stylesheet" href="popup.css">
   </head>
   <body>
-    <main class="setup-shell">
-      <header class="setup-header">
-        <div class="eyebrow"><img src="../assets/weaver-mark.svg" width="34" height="34" alt=""><span>Weaver setup</span></div>
-        <h1>Nothing to manage.<br>Just weave.</h1>
-        <p>Weaver lives beneath posts on X. This page only appears when setup or recovery needs your attention.</p>
+    <main class="setup-shell" id="setup-shell" data-connection="checking">
+      <header class="top-bar">
+        <img src="../assets/weaver-mark.svg" width="28" height="28" alt="">
+        <h1>Weaver</h1>
+        <button class="close-button" id="close-button" type="button" aria-label="Close Weaver">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"></path></svg>
+        </button>
       </header>
 
-      <section class="settings-card" aria-label="Essential settings">
+      <section class="connection-hero" aria-live="polite">
+        <div class="hero-status"><i aria-hidden="true"></i><span id="hero-status">Checking</span></div>
+        <h2 id="hero-title">Checking Weaver</h2>
+        <p id="hero-description">Confirming the local backend connection.</p>
+      </section>
+
+      <div class="section-label">Setup</div>
+      <section class="settings-list" aria-label="Weaver setup">
         <div class="setting-row">
-          <label for="project-input">Projects folder</label>
-          <div class="setting-value" id="project-display-row">
+          <span class="setting-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v10H3V6Z"></path></svg>
+          </span>
+          <div class="setting-copy" id="project-display-row">
+            <label for="project-input">Projects folder</label>
             <span id="project-value">Discovered on first weave</span>
-            <button class="text-action" id="change-project" type="button">Change</button>
           </div>
-          <input id="project-input" type="text" spellcheck="false" placeholder="C:\Projects\Weaver" hidden>
+          <input class="setting-input" id="project-input" type="text" spellcheck="false" placeholder="Projects folder path" hidden>
+          <button class="text-action" id="change-project" type="button">Change</button>
         </div>
+
         <div class="setting-row">
-          <label>Codex app server</label>
-          <div class="setting-value">
-            <button class="connection-status" id="refresh-connection" type="button" title="Check connection again">
-              <i class="status-dot" aria-hidden="true"></i>
-              <span id="connection-value">Checking locally...</span>
-            </button>
-            <button class="secondary-action" id="advanced-button" type="button" aria-expanded="false">Advanced</button>
+          <span class="setting-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="6" rx="2"></rect><rect x="4" y="13" width="16" height="6" rx="2"></rect><path d="M8 8h.01M8 16h.01"></path></svg>
+          </span>
+          <div class="setting-copy">
+            <strong>Weaver backend</strong>
+            <span id="endpoint-value">127.0.0.1:4500</span>
           </div>
-          <div class="advanced-panel" id="advanced-panel" hidden>
-            <label for="endpoint-input">Endpoint</label>
-            <input id="endpoint-input" type="url" spellcheck="false">
-            <label class="check-row"><input id="open-input" type="checkbox"><span>Open Codex Desktop when ready</span></label>
+          <button class="connection-status" id="refresh-connection" type="button" title="Check connection again">
+            <i class="status-dot" aria-hidden="true"></i>
+            <span id="connection-value">Checking</span>
+          </button>
+        </div>
+
+        <button class="setting-row advanced-row" id="advanced-button" type="button" aria-expanded="false">
+          <span class="setting-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"></path><circle cx="16" cy="7" r="2"></circle><circle cx="8" cy="17" r="2"></circle></svg>
+          </span>
+          <strong>Advanced</strong>
+          <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"></path></svg>
+        </button>
+
+        <div class="advanced-panel" id="advanced-panel" hidden>
+          <label class="advanced-field" for="endpoint-input"><span>Endpoint</span><input id="endpoint-input" type="url" spellcheck="false"></label>
+          <label class="check-row"><input id="open-input" type="checkbox"><span>Open Codex Desktop when build finishes</span></label>
+        </div>
+
+        <div class="setting-row recovery-row" id="recovery-row" hidden>
+          <span class="setting-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="m7 9 3 3-3 3M12 15h5"></path></svg>
+          </span>
+          <div class="setting-copy">
+            <strong>Start backend</strong>
+            <code id="start-command">sfw pnpm backend --extension-id &lt;extension-id&gt;</code>
           </div>
+          <button class="text-action" id="copy-command" type="button">Copy</button>
         </div>
       </section>
 
       <p class="form-error" id="form-error" role="alert" hidden></p>
+      <div class="popup-spacer"></div>
 
-      <section class="recovery-card" aria-labelledby="recovery-title">
-        <div class="recovery-heading"><i aria-hidden="true"></i><h2 id="recovery-title">If Codex is offline</h2></div>
-        <p>Start the local app server, then return to the post and choose Weave again.</p>
-        <div class="command-row">
-          <code id="start-command">codex app-server --listen ws://127.0.0.1:4500</code>
-          <button id="copy-command" type="button">Copy</button>
-        </div>
-      </section>
-
-      <footer>
-        <span id="save-status">Changes save automatically</span>
-        <button id="done-button" type="button">Done</button>
+      <footer class="popup-footer">
+        <button class="help-action" id="help-button" type="button" aria-expanded="false">
+          <strong id="footer-title">Need help?</strong>
+          <span id="save-status">View recovery steps</span>
+        </button>
+        <button class="primary-action" id="done-button" type="button">Done</button>
       </footer>
     </main>
     <script src="popup.js"></script>

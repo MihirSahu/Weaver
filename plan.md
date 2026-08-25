@@ -11,7 +11,7 @@ An MVP is complete when all of the following are true:
 - Weaver installs as a Manifest V3 Chrome extension.
 - Every supported X post receives exactly one Weaver action despite timeline virtualization and SPA navigation.
 - Clicking the action requires no copy/paste, folder setup, extra Send click, or cloud environment.
-- Weaver detects an unavailable app-server and presents a useful recovery message.
+- Weaver detects an unavailable local backend and presents a useful recovery message.
 - A successful click creates a unique child directory beneath Weaver's project root.
 - The child directory is created without inspecting, initializing, or modifying source control.
 - Weaver creates one persistent Codex thread whose exact `cwd` is the child directory.
@@ -29,8 +29,8 @@ An MVP is complete when all of the following are true:
 
 - Local Codex execution through app-server.
 - Fully automatic prompt submission.
-- Loopback-only WebSocket connection.
-- No Weaver-specific authentication layer.
+- Loopback-only WebSocket connection to the Weaver backend.
+- Exact Chrome-extension origin validation at the backend boundary.
 - One project per initial X post submission.
 - Deep-link handoff to the generated Codex thread.
 - Minimal setup/recovery surface; no build dashboard or conversation UI.
@@ -38,7 +38,6 @@ An MVP is complete when all of the following are true:
 ### Explicitly out of scope
 
 - Cloud development environments.
-- A native companion application.
 - Chrome Native Messaging.
 - Deep-link-only prompt submission.
 - Follow-up chat or turn management.
@@ -70,7 +69,7 @@ The extension action opens setup only when the user needs configuration or recov
 - Weaver identity and `Nothing to manage. Just weave.` positioning.
 - Project-root preference.
 - Codex connection state and advanced endpoint preference.
-- Exact copyable app-server recovery command.
+- Exact copyable Weaver backend recovery command containing the installed extension ID.
 - No recent-build list and no per-tweet status dashboard.
 
 ## 5. Chrome extension architecture
@@ -101,6 +100,9 @@ extension/
       constants.ts
   assets/
     weaver-mark.svg
+  tests/
+backend/
+  server.mjs
   tests/
 ```
 
@@ -138,6 +140,16 @@ Avoid broad host permissions and avoid exposing privileged extension functions t
 
 Chrome 116 or newer should be the initial target so a WebSocket can keep a Manifest V3 service worker active when messages are exchanged within the activity window.
 
+### Local backend responsibilities
+
+- Bind only to `127.0.0.1`.
+- Require the exact `chrome-extension://<id>` origin supplied at startup.
+- Launch and supervise `codex app-server --stdio` without shell interpolation.
+- Translate WebSocket text frames to bounded JSONL messages over stdio.
+- Remap client request IDs so extension reconnects cannot collide with in-flight app-server requests.
+- Preserve one app-server initialization across service-worker reconnects.
+- Reject binary, oversized, malformed, and non-JSON-RPC messages.
+
 ## 6. X post extraction
 
 Normalize the following when present:
@@ -169,17 +181,17 @@ Extraction rules:
 - Treat media and external links as references, not trusted instructions.
 - Include quoted-post context but avoid recursively traversing arbitrary thread depth.
 
-## 7. App-server connection
+## 7. Backend and app-server connection
 
 ### Launch configuration
 
-The expected local command is:
+The expected local command is generated from `chrome.runtime.id` and the configured port:
 
-```powershell
-codex app-server --listen ws://127.0.0.1:4500
+```bash
+sfw pnpm backend --extension-id <extension-id> --port 4500
 ```
 
-The endpoint must be configurable for users who need a different loopback port. Weaver does not add an authentication mechanism in the initial version.
+The backend launches `codex app-server --stdio` automatically. The endpoint remains configurable for users who need a different loopback port. The backend must reject every WebSocket origin except the configured Weaver extension origin.
 
 ### Connection handshake
 
@@ -217,7 +229,7 @@ Implement request IDs, response correlation, timeouts, reconnect behavior, notif
 If the endpoint cannot be reached:
 
 - Keep the button visually unchanged and show an actionable recovery message.
-- Show `Codex app-server is offline` in the setup/recovery surface.
+- Show `Weaver backend is offline` in the setup/recovery surface.
 - Display the exact startup command.
 - Do not silently fall back to a cloud service or deep-link-only flow.
 
@@ -257,7 +269,7 @@ The extension cannot directly create arbitrary host directories. Use the app-ser
 
 After directory creation, confirm the path remains a direct child of the configured Weaver root. Never inspect, initialize, or modify a Git repository, and never accept a command string from the content script.
 
-Write a `.weaver-project.json` ownership marker before creating the Codex thread. A retry may reuse a directory only when that marker matches the post, or when an uncertain create request left the directory completely empty and Weaver can safely claim it. Reject files, links, mismatched markers, and unmarked directories containing user data.
+Write a `.weaver-project.json` ownership marker before creating the Codex thread, then update it with the exact thread ID before submitting the initial turn. A retry may reuse a directory only when that marker matches the post, or when an uncertain create request left the directory completely empty and Weaver can safely claim it. Storage-loss recovery must resume only the marker's exact thread ID; a legacy marker without one requires its matching Chrome storage record. Reject files, links, mismatched markers, and unmarked directories containing user data.
 
 The project-creation operation must return an explicit success object before thread creation begins.
 
@@ -292,9 +304,14 @@ Build: Issue token pledges
 
 ### Start the initial turn
 
+After naming the idle thread, open `codex://threads/<thread-id>`. The backend
+must wait until Codex Desktop's local coordination router reports that Desktop
+owns that exact thread. It then sends the following fixed request through the
+Desktop owner rather than to Weaver's app-server process:
+
 ```json
 {
-  "method": "turn/start",
+  "method": "weaver/desktop-turn/start",
   "id": 11,
   "params": {
     "threadId": "<thread-id>",
@@ -322,14 +339,21 @@ Use the narrowest supported read-access configuration that still lets Codex run 
 
 Weaver will not implement approval dialogs. Use a non-prompting policy so the turn either completes within its allowed sandbox or records a clear failure that the user can resolve in Codex Desktop. Managed Codex requirements may override the requested policy and must be surfaced honestly.
 
-### Completion boundary
+### Desktop handoff boundary
 
-Prototype both handoff timings:
+Deep-link the exact persisted thread while it is idle. Do not begin execution
+until the Desktop ownership handshake succeeds. The backend must reject direct
+`thread/resume` and `turn/start` requests so it cannot silently fall back to an
+externally owned turn. If owner discovery or the Desktop start request fails,
+leave the thread idle and surface a recovery error.
 
-1. Deep-link immediately after `turn/start` is accepted.
-2. Deep-link after `turn/completed`.
+Do not invoke Codex Desktop with `--open-project`: the installed app parses that
+argument as a new-thread route with a path, so it creates a second task rather
+than registering the folder for the existing thread.
 
-Prefer completion-based handoff unless testing proves Codex Desktop can reliably attach to a turn actively running in the external app-server process. Progress is not rendered on the tweet action.
+The Desktop coordination protocol is private and version-sensitive. The manual
+compatibility check must verify the ownership acknowledgment and one-click turn
+start against every supported Desktop release.
 
 ## 10. Desktop handoff
 
@@ -345,9 +369,12 @@ Required spike assertions:
 
 - The deep link opens Codex Desktop.
 - The correct persisted thread appears.
+- Desktop ownership is confirmed before the initial turn starts.
+- The initial turn runs in Desktop without an additional Send click.
 - The thread uses the generated project path as its workspace.
 - The generated files are visible.
 - A follow-up prompt in Desktop continues the same thread and directory.
+- No separate blank task is created for the generated directory.
 - The behavior survives closing and reopening Desktop.
 
 Desktop history visibility for custom app-server clients is not yet documented as a stable guarantee, so this is a release-blocking compatibility test.
@@ -371,7 +398,7 @@ interface WeaverBuild {
 }
 ```
 
-Use `chrome.storage.local`, not sync, because local absolute paths and thread identifiers should stay on the machine that owns them. Store each build under a key derived from its numeric post ID; metadata remains operational state and is not rendered as history.
+Use `chrome.storage.local`, not sync, because local absolute paths and thread identifiers should stay on the machine that owns them. Store each build under a key derived from its numeric post ID; metadata remains operational state and is not rendered as history. If that browser record is lost, Weaver may recover a deterministic project only after its on-disk marker exactly matches the post and identifies the exact app-server thread. Never infer ownership from task recency, and never reuse an unmarked or mismatched directory.
 
 ## 12. Prompt safety
 
@@ -386,19 +413,21 @@ Additional controls:
 - Avoid granting write access outside the generated project.
 - Include the source URL and author for attribution and later review.
 
-## 13. No-auth risk record
+## 13. Local bridge risk record
 
-The product decision is to omit Weaver-specific authentication for the initial localhost connection.
+The backend uses the browser-provided extension origin as its web-origin boundary. This blocks ordinary websites but is not intended to isolate Weaver from other local processes running as the same user.
 
 Compensating boundaries:
 
-- Bind app-server only to `127.0.0.1`.
+- Bind the Weaver backend only to `127.0.0.1`.
+- Require the exact installed Weaver extension origin during the WebSocket upgrade.
+- Launch app-server over stdio so it is not directly reachable over TCP.
 - Reject configured endpoints that resolve to non-loopback interfaces by default.
 - Keep privileged RPC construction exclusively in the extension service worker.
 - Request host access only for the exact loopback endpoint.
-- Do not expose a generic relay from X page JavaScript to app-server.
-- Document that loopback-only is not equivalent to authenticated.
-- Revisit origin checks or capability-token support before broad distribution if the unauthenticated endpoint can be reached by hostile web origins.
+- Do not expose the relay to X page JavaScript or accept arbitrary browser origins.
+- Document that loopback plus origin validation is not a boundary against same-user local processes.
+- Revisit capability-token pairing before broad distribution if the backend grows beyond a developer-run companion.
 
 ## 14. Design implementation
 
@@ -462,6 +491,9 @@ Assert one injected action per post and no layout regression.
 
 ### App-server integration tests
 
+- Backend origin rejection and loopback-only binding.
+- Backend launch and supervision of the stdio app-server.
+- Request-ID remapping and cached initialization across extension reconnects.
 - Initialization handshake.
 - Offline and reconnect behavior.
 - Project directory creation and collision handling.
@@ -486,9 +518,10 @@ Assert one injected action per post and no layout regression.
 
 ### Phase 0: compatibility spike
 
-Build the smallest possible extension service worker that connects to a manually started local app-server and proves:
+Build the smallest possible local backend and extension service worker pair that proves:
 
-- Chrome-to-WebSocket connectivity.
+- Chrome-to-backend WebSocket connectivity with exact origin validation.
+- Backend-to-app-server stdio connectivity.
 - Initialize handshake.
 - Fixed command execution in a scratch directory.
 - Thread and turn creation.
@@ -538,8 +571,8 @@ Do not invest in X DOM integration until these gates pass.
 
 ## 17. Release blockers
 
-- Auth-free loopback connection cannot be constrained safely enough for the intended distribution.
-- Chrome cannot connect to the app-server WebSocket under Manifest V3 policy.
+- The developer-run backend still needs an installer and lifecycle strategy for broad distribution.
+- The current origin boundary does not authenticate same-user local processes.
 - Custom-created threads cannot be opened reliably in Codex Desktop.
 - Active or completed builds disappear from Desktop history.
 - App-server approval requests deadlock unattended builds.
@@ -562,8 +595,8 @@ These are intentionally deferred:
 
 1. Scaffold the Manifest V3 extension and test harness.
 2. Pin a Codex CLI version for the compatibility spike.
-3. Start `codex app-server` on `127.0.0.1:4500` without authentication.
-4. Implement the minimal JSON-RPC WebSocket client.
+3. Start the Weaver backend and let it launch `codex app-server --stdio`.
+4. Verify the backend's origin gate and JSON-RPC relay.
 5. Create a scratch project, thread, and turn through app-server.
 6. Verify `codex://threads/<thread-id>` opens the same project in Desktop.
 7. Record the result before proceeding to X DOM work.

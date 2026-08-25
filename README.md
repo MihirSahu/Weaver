@@ -2,7 +2,7 @@
 
 **Turn posts into projects.**
 
-Weaver is a Chrome extension for X that adds a **Weave** action to every post. Clicking it sends the post to a locally running Codex app-server, creates a new local project, asks Codex to build the idea, and hands the result to Codex Desktop.
+Weaver is a Chrome extension for X that adds a **Weave** action to every post. Clicking it sends the post through Weaver's local backend to Codex app-server, creates a new local project, asks Codex to build the idea, and hands the result to Codex Desktop.
 
 The intended experience is one click from inspiration to an active local build:
 
@@ -10,11 +10,13 @@ The intended experience is one click from inspiration to an active local build:
 X post
   -> Weave button
   -> Chrome extension service worker
-  -> Codex app-server on localhost
+  -> Weaver backend on localhost
+  -> Codex app-server over stdio
   -> isolated local project directory
-  -> initial Codex build turn
   -> codex://threads/<thread-id>
   -> Codex Desktop
+  -> Desktop ownership confirmation
+  -> initial Codex build turn
 ```
 
 ## Product principles
@@ -25,23 +27,30 @@ X post
 - **Codex Desktop owns continuation.** Follow-up prompts, approvals, reviews, changes, and ongoing project management happen in Codex Desktop.
 - **One post, one project, one initial thread.** Each build gets its own directory and Codex thread.
 - **Source-control neutral.** Weaver never initializes, inspects, or modifies Git repositories; Codex or the user can choose source control later.
-- **No Weaver authentication layer.** The initial product connects to a loopback-only app-server without adding a separate authentication flow.
+- **Origin-scoped local bridge.** The backend accepts only the exact installed Weaver extension origin and never binds beyond loopback.
 
 ## User experience
 
 ### One-time setup
 
 1. Install and sign in to Codex CLI or Codex Desktop.
-2. Run Codex app-server on localhost:
+2. Install dependencies and build the extension:
 
-   ```powershell
-   codex app-server --listen ws://127.0.0.1:4500
+   ```bash
+   sfw pnpm install
+   sfw pnpm run build
    ```
 
-3. Configure the app-server to start at login for a fully automatic daily experience.
-4. Install Weaver.
+3. Load `dist/` as an unpacked extension from `chrome://extensions`.
+4. Open Weaver from the Chrome toolbar and copy its backend startup command. It includes the installed extension ID, for example:
 
-No `TweetBuilds` folder needs to be added manually to Codex Desktop. Weaver opens the generated Codex thread through a deep link, and that thread already records the generated project's working directory.
+   ```bash
+   sfw pnpm backend --extension-id abcdefghijklmnopabcdefghijklmnop --port 4500
+   ```
+
+5. Run that command from this repository. The Weaver backend launches and supervises Codex app-server automatically. It keeps `sfw` around pnpm, but gives the Codex child a direct connection so Socket Firewall's temporary TLS certificate is not applied to the model WebSocket.
+
+Weaver does not attempt a separate Codex Desktop folder-registration step. It records the generated directory as the thread's `cwd`, opens that exact persisted thread before execution, waits for Desktop to own it, and only then starts the build. With the current Desktop interface, externally created threads may still appear under **Chats** rather than under a local project; preserving the one thread and Desktop-owned execution takes precedence over creating a second folder-scoped task.
 
 ### Building from X
 
@@ -49,15 +58,15 @@ No `TweetBuilds` folder needs to be added manually to Codex Desktop. Weaver open
 2. Click **Weave** beneath a post.
 3. Weaver extracts the post's canonical URL, author, text, quoted-post context, and media links.
 4. Weaver creates a uniquely named directory inside its project root.
-5. Weaver creates a Codex thread scoped to that directory and submits the build instruction.
-6. The button remains the same single **Weave** action while operational state stays in the background.
-7. When the initial turn is ready for handoff, Weaver opens:
+5. Weaver creates and names an idle Codex thread scoped to that directory.
+6. Weaver opens the existing thread, never a second chat:
 
    ```text
    codex://threads/<thread-id>
    ```
 
-8. The user continues in Codex Desktop.
+7. The backend waits until Codex Desktop confirms ownership of that exact thread.
+8. The backend submits the initial build turn through Desktop. No extra Send click is required.
 
 ## Scope
 
@@ -66,7 +75,7 @@ Weaver is responsible for:
 - Detecting X posts in the dynamically rendered timeline.
 - Injecting one native-feeling **Weave** action per post.
 - Extracting and normalizing post context.
-- Connecting to Codex app-server over a localhost WebSocket.
+- Connecting to the Weaver backend over a localhost WebSocket.
 - Creating a unique local project directory.
 - Starting one persistent Codex thread in that directory.
 - Sending one initial build turn.
@@ -92,24 +101,26 @@ Weaver is not responsible for:
 Weaver should use Manifest V3 with:
 
 - A content script on `https://x.com/*` that observes the SPA timeline and injects buttons idempotently.
-- A service worker that owns app-server communication and constructs all privileged RPC requests.
-- A small setup surface for the app-server connection, project root, and offline recovery command.
+- A service worker that owns relayed app-server communication and constructs all privileged RPC requests.
+- A small setup surface for the Weaver backend connection, project root, and offline recovery command.
 - Local extension storage for settings and per-tweet operational metadata.
 
 The content script must never be allowed to send arbitrary app-server methods or arbitrary shell commands. It sends normalized post data to the service worker; the service worker chooses fixed RPC methods and validated arguments.
 
-### Codex app-server
+### Weaver backend and Codex app-server
 
-Codex app-server provides the local programmatic interface. Weaver uses its WebSocket JSON-RPC transport to:
+Chrome attaches an `Origin` header to extension WebSockets, while Codex app-server rejects WebSocket handshakes that contain one. Weaver therefore includes a loopback-only backend that validates the exact `chrome-extension://<id>` origin, launches `codex app-server --stdio`, and relays newline-delimited JSON-RPC messages.
+
+The extension still owns Weaver's product behavior. It uses the relayed Codex app-server interface to:
 
 1. Initialize the client connection.
 2. Create and initialize the project directory.
 3. Start a persistent thread with the project directory as `cwd`.
 4. Set a readable thread name.
-5. Start the initial build turn.
-6. Observe acceptance or completion sufficiently to provide a reliable Desktop handoff.
+5. Open the idle thread in Codex Desktop.
+6. Confirm Desktop owns the thread, then submit the initial build turn through Desktop's local coordination channel.
 
-The WebSocket app-server transport is currently experimental, so compatibility should be pinned and tested against supported Codex releases.
+The backend preserves the app-server process across extension service-worker reconnects, remaps JSON-RPC request IDs, and reuses the completed initialization handshake. It rejects all non-Weaver browser origins and supports only one active extension connection. Backend-owned `thread/resume` and `turn/start` requests are rejected. After the deep link opens the idle task, the backend uses Codex Desktop's owner-only local IPC to discover the owning Desktop window and forwards exactly one project-scoped start-turn request to it. If ownership cannot be confirmed, Weaver fails without starting execution. This IPC is an installed-app compatibility surface, not a documented public Codex API.
 
 ### Project organization
 
@@ -128,7 +139,7 @@ The intended layout is:
 
 Directory names use a sanitized post-derived slug plus the X post ID. This makes collisions unlikely while preserving traceability.
 
-Each project contains a small `.weaver-project.json` ownership marker so interrupted submissions can safely distinguish Weaver's directory from unrelated user data. Each Codex thread uses the child project directory as its exact `cwd`. Builds should not share a working directory or receive write access to sibling projects.
+Each project contains a small `.weaver-project.json` marker that records ownership and, after thread creation, the exact Codex thread ID. This lets interrupted submissions recover without guessing among tasks in the same folder. Legacy markers without a thread ID require their matching Chrome storage record rather than adopting an arbitrary task. Each Codex thread uses the child project directory as its exact `cwd`. Builds should not share a working directory or receive write access to sibling projects.
 
 ## Initial build instruction
 
@@ -171,27 +182,28 @@ The current direction uses:
 
 ## Deliberate technical decisions
 
-### Why app-server
+### Why app-server and a local backend
 
-A Chrome extension cannot launch arbitrary host processes by itself. Native Messaging would require a separately installed companion application, and a cloud execution service would add infrastructure, cost, and privacy complexity. Codex app-server reuses the user's installed local coding agent and authentication.
+A Chrome extension cannot launch arbitrary host processes by itself, and Codex app-server rejects browser WebSockets that carry an Origin header. The repository's local backend bridges that gap: it validates Weaver's extension origin and launches Codex app-server over stdio. A cloud execution service would add infrastructure, cost, and privacy complexity; Codex app-server reuses the user's installed local coding agent and authentication.
 
 ### Why not deep links alone
 
-Codex deep links support a workspace path and prefilled prompt, but the prompt is not submitted automatically. A deep-link-only version would require the user to press Send and would not meet Weaver's one-click requirement. Weaver therefore uses app-server for execution and a deep link only for the final Desktop handoff.
+Codex deep links support a workspace path and prefilled prompt, but the prompt is not submitted automatically. A deep-link-only version would require the user to press Send and would not meet Weaver's one-click requirement. Weaver therefore uses app-server to create the idle task, a deep link to attach it to Desktop, and Desktop's owner coordination channel to start the turn without a second click.
 
 ### Why separate projects
 
 Every initial build gets its own directory and Codex thread. Follow-up prompts are turns on that existing thread in Codex Desktop, not new Weaver projects. Weaver leaves all source-control decisions to Codex Desktop and the user.
 
-### No authentication
+### Local security boundary
 
-The initial product intentionally does not add authentication between the extension and the loopback app-server. The listener must remain bound to `127.0.0.1`, never a LAN or public interface. This is a conscious MVP tradeoff and is documented as a security risk rather than treated as a security guarantee.
+The backend binds only to `127.0.0.1` and requires the exact Weaver extension origin supplied with `--extension-id`. It must never bind to a LAN or public interface. Origin validation prevents ordinary websites such as X from opening the privileged bridge; local processes remain in the user's local trust boundary.
 
 ## Important risks
 
-- Codex app-server WebSocket transport is experimental and may change.
-- Desktop visibility and live attachment behavior for threads created by an external app-server client need an end-to-end compatibility spike.
-- An unauthenticated localhost command-capable endpoint can be targeted by other local software or potentially by hostile web content if origin protections are insufficient.
+- Codex app-server remains a development interface and may change.
+- Codex Desktop's local ownership IPC is undocumented and version-sensitive; each target Desktop release needs an end-to-end compatibility check.
+- Current Codex Desktop has no supported single handoff that both registers a folder and opens an existing externally created thread; Weaver preserves the thread and its `cwd` rather than creating a second task.
+- Same-user local software can imitate the allowed extension origin; the current boundary is designed to block hostile web pages, not untrusted local processes.
 - X is a frequently changing SPA; DOM selectors and injection logic will require regression coverage.
 - Post contents are untrusted and may contain prompt-injection attempts.
 - Unattended builds need a permission policy that cannot block indefinitely waiting for approval UI that Weaver does not provide.
@@ -202,41 +214,43 @@ The initial product intentionally does not add authentication between the extens
 
 The Manifest V3 MVP is implemented in `extension/` and builds to `dist/`. It includes:
 
+- A loopback-only backend that validates the installed extension origin, launches Codex app-server over stdio, and survives extension reconnects.
 - Idempotent X timeline/detail-page observation and Paper-matched Weave action injection.
 - Normalized post, quote, media, and outbound-link extraction.
 - A loopback-only WebSocket JSON-RPC client with handshake, correlation, timeouts, reconnects, overload retry, notification dispatch, and keepalive traffic.
 - Validated project slugs, direct-child path enforcement, and fixed app-server filesystem operations.
-- Independently keyed per-tweet metadata, duplicate-click handling, restart reconciliation, one Codex thread, a fixed untrusted-content prompt envelope, completion tracking, and Desktop deep-link handoff.
+- Independently keyed per-tweet metadata, duplicate-click handling, read-only restart reconciliation, marker-verified recovery when Chrome storage is lost, one Codex thread, a fixed untrusted-content prompt envelope, and fail-closed Desktop ownership handoff.
 - The 420px Paper setup/recovery surface with live connection, project-root, endpoint, and copyable recovery controls; it contains no build dashboard.
 
-The protocol implementation is verified against bindings generated by `codex-cli 0.145.0`. WebSocket transport and Desktop attachment remain experimental Codex surfaces and still require the manual compatibility test below on each target platform.
+The protocol implementation is verified against bindings generated by `codex-cli 0.145.0`; the backend relay has also completed a live initialize/read-only request spike against `codex-cli 0.144.3`. App-server compatibility and Desktop attachment still require the manual compatibility test below on each target platform.
 
 ## Develop and verify
 
-```powershell
-npm install
-npm run check
+```bash
+sfw pnpm install
+sfw pnpm run check
 ```
 
-`npm run build` produces the unpacked extension in `dist/`. Load that directory from `chrome://extensions` with Developer mode enabled.
+`sfw pnpm run build` produces the unpacked extension in `dist/`. Load that directory from `chrome://extensions` with Developer mode enabled.
 
-Start Codex app-server before using Weaver:
+Start the Weaver backend before using the extension. Copy the exact command from the popup so the extension ID matches:
 
-```powershell
-codex app-server --listen ws://127.0.0.1:4500
+```bash
+sfw pnpm backend --extension-id <extension-id> --port 4500
 ```
 
-The setup surface can change the loopback port and project root. If the root is blank, Weaver discovers the app-server user's home directory on the first submission and stores `<home>/Weaver` locally.
+The backend launches `codex app-server --stdio`; do not start app-server separately. When launched through `sfw`, the backend removes only the detected Socket Firewall loopback proxy and temporary CA from the Codex child so its authenticated model connection remains end-to-end TLS. The setup surface can change the loopback port and project root. If the root is blank, Weaver discovers the app-server user's home directory on the first submission and stores `<home>/Weaver` locally.
 
 ## Manual compatibility check
 
 Automated tests cover extraction, path boundaries, prompt separation, state transitions, timeline virtualization, and JSON-RPC handshake/correlation. Before release, perform the compatibility spike that crosses OS/application boundaries:
 
-1. Start the pinned Codex app-server command above.
+1. Start the Weaver backend with the command shown in the extension popup.
 2. Load `dist/` as an unpacked Chrome extension.
 3. Open a controlled X post and click **Weave** once.
 4. Confirm exactly one child project directory and no source-control side effects.
-5. Confirm the initial turn completes and `codex://threads/<thread-id>` opens that exact thread and working directory in Codex Desktop.
-6. Continue the same thread after restarting Chrome and Codex Desktop.
+5. Confirm `codex://threads/<thread-id>` opens the exact idle thread with the generated directory as its `cwd` before any turn starts.
+6. Confirm the backend logs Desktop ownership before the turn ID, the task runs without appearing paused, and no extra Send click is required.
+7. Restart Chrome and Codex Desktop, then confirm Weaver can read the persisted task without stealing Desktop ownership.
 
 See [plan.md](./plan.md) for the full acceptance criteria, threat record, and remaining release blockers.

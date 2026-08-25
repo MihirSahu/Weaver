@@ -44,7 +44,7 @@ export class CodexClient {
 
   readonly endpoint: string;
 
-  constructor(endpoint: string, private readonly requestTimeoutMs = 20_000) {
+  constructor(endpoint: string, private readonly requestTimeoutMs = 35_000) {
     this.endpoint = validateLoopbackEndpoint(endpoint);
   }
 
@@ -92,7 +92,7 @@ export class CodexClient {
         if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
       }
     }
-    throw lastError instanceof Error ? lastError : new Error("Codex app-server is offline.");
+    throw lastError instanceof Error ? lastError : new Error("Weaver backend is offline.");
   }
 
   private openSocket(): Promise<void> {
@@ -100,7 +100,7 @@ export class CodexClient {
       const socket = new WebSocket(this.endpoint);
       const timeout = setTimeout(() => {
         socket.close();
-        reject(new Error("Timed out connecting to Codex app-server."));
+        reject(new Error("Timed out connecting to Weaver backend."));
       }, 4_000);
       socket.addEventListener("open", () => {
         clearTimeout(timeout);
@@ -109,7 +109,7 @@ export class CodexClient {
       }, { once: true });
       socket.addEventListener("error", () => {
         clearTimeout(timeout);
-        reject(new Error("Codex app-server is offline."));
+        reject(new Error("Weaver backend is offline."));
       }, { once: true });
       socket.addEventListener("message", (event) => this.handleMessage(event.data));
       socket.addEventListener("close", () => this.handleClose(socket));
@@ -148,7 +148,7 @@ export class CodexClient {
   }
 
   private send(message: unknown): void {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) throw new Error("Codex app-server connection is not open.");
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) throw new Error("Weaver backend connection is not open.");
     this.socket.send(JSON.stringify(message));
   }
 
@@ -191,7 +191,7 @@ export class CodexClient {
     this.keepalive = null;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
-      pending.reject(new Error("Codex app-server disconnected."));
+      pending.reject(new Error("Weaver backend disconnected."));
     }
     this.pending.clear();
     if (notify) this.disconnectListeners.forEach((listener) => listener());

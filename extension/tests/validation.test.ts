@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isPostContext, normalizeStatusUrl, requiresClientReconnect, validateLoopbackEndpoint, validateSettings } from "../src/shared/validation";
-import { appServerStartCommand } from "../src/shared/constants";
+import { backendStartCommand } from "../src/shared/constants";
 
 describe("loopback endpoint validation", () => {
   it.each(["ws://127.0.0.1:4500", "ws://localhost:9999"])("accepts %s", (endpoint) => {
@@ -35,6 +35,8 @@ it("keeps the active client for settings changes that do not change its endpoint
   expect(requiresClientReconnect(previous, { ...previous, endpoint: "ws://127.0.0.1:4600" })).toBe(true);
 });
 
-it("builds recovery guidance from the configured endpoint", () => {
-  expect(appServerStartCommand("ws://127.0.0.1:4600")).toBe("codex app-server --listen ws://127.0.0.1:4600");
+it("builds backend recovery guidance from the extension ID and configured endpoint", () => {
+  expect(backendStartCommand("abcdefghijklmnopabcdefghijklmnop", "ws://127.0.0.1:4600")).toBe(
+    "sfw pnpm backend --extension-id abcdefghijklmnopabcdefghijklmnop --port 4600",
+  );
 });

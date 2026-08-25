@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CodexClient } from "../src/background/codex-client";
 import type { PostContext } from "../src/shared/models";
-import { assertDirectChild, createProjectSlug, isAbsoluteHostPath, prepareProject } from "../src/background/project-manager";
+import {
+  assertDirectChild,
+  createProjectSlug,
+  isAbsoluteHostPath,
+  prepareProject,
+  recordProjectThread,
+} from "../src/background/project-manager";
 
 describe("project slug", () => {
   it("uses lowercase ASCII, caps the descriptive part, and retains the post id", () => {
@@ -124,6 +130,100 @@ it("retries a marked persisted project under its original root after the default
     projectPath: "C:\\Old-Weaver-Root\\idea-123",
   });
   expect(request.mock.calls.filter(([method]) => method === "fs/createDirectory")).toHaveLength(1);
+});
+
+it("recovers a marker-owned deterministic project when Chrome storage is missing", async () => {
+  const request = vi.fn(async (method: string, params?: { path?: string }) => {
+    if (method === "command/exec") return { exitCode: 0, stdout: "C:\\Users\\me\r\n", stderr: "" };
+    if (method === "fs/readDirectory" && params?.path === "C:\\Weaver") {
+      return { entries: [{ fileName: "idea-123", isDirectory: true, isFile: false }] };
+    }
+    if (method === "fs/readDirectory") {
+      return { entries: [{ fileName: ".weaver-project.json", isDirectory: false, isFile: true }] };
+    }
+    if (method === "fs/getMetadata" && params?.path?.endsWith(".weaver-project.json")) {
+      return { isDirectory: false, isFile: true, isSymlink: false };
+    }
+    if (method === "fs/getMetadata") return { isDirectory: true, isFile: false, isSymlink: false };
+    if (method === "fs/readFile") {
+      return { dataBase64: btoa(`${JSON.stringify({
+        version: 1,
+        postId: "123",
+        projectName: "idea-123",
+        threadId: "thread-123",
+      }, null, 2)}\n`) };
+    }
+    return {};
+  });
+  const post: PostContext = {
+    postId: "123", canonicalUrl: "https://x.com/a/status/123", authorDisplayName: "A", authorHandle: "@a",
+    text: "Idea", mediaUrls: [], outboundUrls: [], capturedAt: "2026-08-05T12:00:00.000Z",
+  };
+
+  await expect(prepareProject(
+    { request } as unknown as CodexClient,
+    { platformOs: "windows" },
+    post,
+    "C:\\Weaver",
+  )).resolves.toMatchObject({
+    projectPath: "C:\\Weaver\\idea-123",
+    wasExisting: true,
+    recoveredThreadId: "thread-123",
+  });
+  expect(request.mock.calls.filter(([method, params]) => method === "fs/createDirectory" && params?.path === "C:\\Weaver\\idea-123")).toHaveLength(0);
+});
+
+it("records the exact Codex thread in the project marker", async () => {
+  const request = vi.fn(async (_method: string, _params?: { path?: string; dataBase64?: string }) => ({}));
+  const post: PostContext = {
+    postId: "123", canonicalUrl: "https://x.com/a/status/123", authorDisplayName: "A", authorHandle: "@a",
+    text: "Idea", mediaUrls: [], outboundUrls: [], capturedAt: "2026-08-05T12:00:00.000Z",
+  };
+
+  await recordProjectThread(
+    { request } as unknown as CodexClient,
+    { platformOs: "windows" },
+    {
+      projectRoot: "C:\\Weaver",
+      projectName: "idea-123",
+      projectPath: "C:\\Weaver\\idea-123",
+      wasExisting: false,
+    },
+    post,
+    "thread-123",
+  );
+
+  const write = request.mock.calls.find(([method]) => method === "fs/writeFile");
+  expect(write?.[1]).toMatchObject({ path: "C:\\Weaver\\idea-123\\.weaver-project.json" });
+  expect(JSON.parse(atob((write?.[1] as { dataBase64: string }).dataBase64))).toEqual({
+    version: 1,
+    postId: "123",
+    projectName: "idea-123",
+    threadId: "thread-123",
+  });
+});
+
+it("rejects a same-named project without a matching Weaver marker when Chrome storage is missing", async () => {
+  const request = vi.fn(async (method: string, params?: { path?: string }) => {
+    if (method === "command/exec") return { exitCode: 0, stdout: "C:\\Users\\me\r\n", stderr: "" };
+    if (method === "fs/readDirectory" && params?.path === "C:\\Weaver") {
+      return { entries: [{ fileName: "idea-123", isDirectory: true, isFile: false }] };
+    }
+    if (method === "fs/readDirectory") return { entries: [] };
+    if (method === "fs/getMetadata") return { isDirectory: true, isFile: false, isSymlink: false };
+    return {};
+  });
+  const post: PostContext = {
+    postId: "123", canonicalUrl: "https://x.com/a/status/123", authorDisplayName: "A", authorHandle: "@a",
+    text: "Idea", mediaUrls: [], outboundUrls: [], capturedAt: "2026-08-05T12:00:00.000Z",
+  };
+
+  await expect(prepareProject(
+    { request } as unknown as CodexClient,
+    { platformOs: "windows" },
+    post,
+    "C:\\Weaver",
+  )).rejects.toThrow(/not marked as a Weaver project/);
 });
 
 it("rejects an unmarked persisted directory that already contains user files", async () => {

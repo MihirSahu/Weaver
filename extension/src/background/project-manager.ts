@@ -27,6 +27,8 @@ export interface CreatedProject {
   projectName: string;
   projectPath: string;
   projectRoot: string;
+  wasExisting: boolean;
+  recoveredThreadId?: string;
 }
 
 export function createProjectSlug(text: string, postId: string): string {
@@ -108,8 +110,13 @@ async function discoverHome(client: CodexClient, platform: InitializeResult): Pr
   return { home, windows };
 }
 
-function projectMarkerContents(post: PostContext, project: CreatedProject): string {
-  return `${JSON.stringify({ version: 1, postId: post.postId, projectName: project.projectName }, null, 2)}\n`;
+function projectMarkerContents(post: PostContext, project: CreatedProject, threadId?: string): string {
+  return `${JSON.stringify({
+    version: 1,
+    postId: post.postId,
+    projectName: project.projectName,
+    ...(threadId ? { threadId } : {}),
+  }, null, 2)}\n`;
 }
 
 function encodeBase64(value: string): string {
@@ -120,11 +127,32 @@ function decodeBase64(value: string): string {
   return atob(value);
 }
 
-async function writeProjectMarker(client: CodexClient, project: CreatedProject, post: PostContext, windows: boolean): Promise<void> {
+async function writeProjectMarker(
+  client: CodexClient,
+  project: CreatedProject,
+  post: PostContext,
+  windows: boolean,
+  threadId?: string,
+): Promise<void> {
   await client.request("fs/writeFile", {
     path: joinHostPath(project.projectPath, PROJECT_MARKER, windows),
-    dataBase64: encodeBase64(projectMarkerContents(post, project)),
+    dataBase64: encodeBase64(projectMarkerContents(post, project, threadId)),
   });
+}
+
+function readProjectMarker(value: string, post: PostContext, project: CreatedProject): { threadId?: string } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const marker = parsed as Record<string, unknown>;
+  if (marker.version !== 1 || marker.postId !== post.postId || marker.projectName !== project.projectName) return undefined;
+  if (marker.threadId !== undefined
+      && (typeof marker.threadId !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(marker.threadId))) return undefined;
+  return { threadId: marker.threadId as string | undefined };
 }
 
 async function verifyOrClaimProjectDirectory(
@@ -132,17 +160,22 @@ async function verifyOrClaimProjectDirectory(
   project: CreatedProject,
   post: PostContext,
   windows: boolean,
-): Promise<void> {
+  allowEmptyClaim: boolean,
+): Promise<string | undefined> {
   const contents = await client.request<DirectoryEntries>("fs/readDirectory", { path: project.projectPath });
   const marker = contents.entries.find((entry) => sameFileName(entry.fileName, PROJECT_MARKER, windows));
   if (!marker) {
     // A disconnected create can leave an empty directory before its marker is
-    // written. Claim only that empty partial result; never adopt user content.
+    // written. Claim only that empty partial result when a persisted build
+    // already identified the path; a name match alone is not ownership.
     if (contents.entries.length > 0) {
       throw new Error(`The persisted Weaver project directory is not owned by Weaver: ${project.projectPath}`);
     }
+    if (!allowEmptyClaim) {
+      throw new Error(`A project named ${project.projectName} already exists but is not marked as a Weaver project.`);
+    }
     await writeProjectMarker(client, project, post, windows);
-    return;
+    return undefined;
   }
   if (!marker.isFile || marker.isDirectory) {
     throw new Error(`The persisted Weaver project marker is not a regular file: ${project.projectPath}`);
@@ -153,9 +186,26 @@ async function verifyOrClaimProjectDirectory(
     throw new Error(`The persisted Weaver project marker is unsafe: ${project.projectPath}`);
   }
   const stored = await client.request<FileContents>("fs/readFile", { path: markerPath });
-  if (decodeBase64(stored.dataBase64) !== projectMarkerContents(post, project)) {
+  const markerContents = readProjectMarker(decodeBase64(stored.dataBase64), post, project);
+  if (!markerContents) {
     throw new Error(`The persisted Weaver project marker does not match this post: ${project.projectPath}`);
   }
+  return markerContents.threadId;
+}
+
+function isWindowsPlatform(platform: InitializeResult): boolean {
+  return `${platform.platformFamily ?? ""} ${platform.platformOs ?? ""}`.toLowerCase().includes("windows");
+}
+
+export async function recordProjectThread(
+  client: CodexClient,
+  platform: InitializeResult,
+  project: CreatedProject,
+  post: PostContext,
+  threadId: string,
+): Promise<void> {
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(threadId)) throw new Error("Codex returned an invalid thread ID.");
+  await writeProjectMarker(client, project, post, isWindowsPlatform(platform), threadId);
 }
 
 export async function prepareProject(
@@ -175,13 +225,17 @@ export async function prepareProject(
   const projectName = createProjectSlug(post.text, post.postId);
   const projectPath = existingProjectPath || joinHostPath(projectRoot, projectName, discovered.windows);
   assertDirectChild(projectRoot, projectPath, discovered.windows);
-  const project = { projectName: trimSeparators(projectPath).split(/[\\/]/).at(-1) ?? projectName, projectPath, projectRoot };
+  const resolvedProjectName = trimSeparators(projectPath).split(/[\\/]/).at(-1) ?? projectName;
 
   await client.request("fs/createDirectory", { path: projectRoot, recursive: true });
   const listing = await client.request<DirectoryEntries>("fs/readDirectory", { path: projectRoot });
-  const existingName = project.projectName;
-  const collision = listing.entries.find((entry) => sameFileName(entry.fileName, existingName, discovered.windows));
-  if (collision && !existingProjectPath) throw new Error(`A project named ${existingName} already exists. Weaver will not reuse it.`);
+  const collision = listing.entries.find((entry) => sameFileName(entry.fileName, resolvedProjectName, discovered.windows));
+  const project: CreatedProject = {
+    projectName: resolvedProjectName,
+    projectPath,
+    projectRoot,
+    wasExisting: Boolean(collision),
+  };
   if (collision) {
     if (!collision.isDirectory || collision.isFile) {
       throw new Error(`The persisted Weaver project path is not a directory: ${projectPath}`);
@@ -190,6 +244,13 @@ export async function prepareProject(
     if (!metadata.isDirectory || metadata.isFile || metadata.isSymlink) {
       throw new Error(`The persisted Weaver project path is not a safe directory: ${projectPath}`);
     }
+    project.recoveredThreadId = await verifyOrClaimProjectDirectory(
+      client,
+      project,
+      post,
+      discovered.windows,
+      Boolean(existingProjectPath),
+    );
   }
   // Persist the deterministic path after ruling out unrelated collisions but
   // before creating it, so a disconnected create request remains retryable.
@@ -197,8 +258,6 @@ export async function prepareProject(
   if (!collision) {
     await client.request("fs/createDirectory", { path: projectPath, recursive: false });
     await writeProjectMarker(client, project, post, discovered.windows);
-  } else {
-    await verifyOrClaimProjectDirectory(client, project, post, discovered.windows);
   }
   return project;
 }
